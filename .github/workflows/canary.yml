@@ -11,6 +11,10 @@ on:
         description: "full-stack-fastapi-template ref (branch, tag, or SHA) to canary"
         required: false
         default: master
+      base_branch:
+        description: "consumer branch to apply the template onto / open the PR against (blank = repo default branch)"
+        required: false
+        default: ""
   # Self-test: run only when a PR edits this workflow. The job-level `if` below
   # skips canary/* PRs so the canary never re-triggers on its own branch.
   pull_request:
@@ -31,12 +35,12 @@ permissions:
 # `canary-master` cancelled in-flight runs). PR runs key on the head branch,
 # dispatch on the chosen ref, schedule/push on the ref name.
 concurrency:
-  group: canary-${{ github.event.pull_request.head.ref || github.event.inputs.template_ref || github.ref_name }}
+  group: canary-${{ github.event.pull_request.head.ref || format('base-{0}-target-{1}', github.event.inputs.base_branch || github.event.repository.default_branch, github.event.inputs.template_ref || 'master') }}
   cancel-in-progress: true
 
 env:
   TEMPLATE_REF: ${{ github.event.inputs.template_ref || 'master' }}
-  BASE_BRANCH: ${{ github.event.repository.default_branch }}
+  BASE_BRANCH: ${{ github.event.inputs.base_branch || github.event.repository.default_branch }}
 
 jobs:
   canary:
@@ -53,13 +57,15 @@ jobs:
           private-key: ${{ secrets.CANARY_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           permission-contents: write
-          permission-pull-requests: write
           permission-workflows: write
           repositories: ${{ github.event.repository.name }}
 
       - name: Check out this repo with the App token (so the push uses it)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Apply onto the chosen base for dispatch/schedule; keep the PR merge
+          # ref for the self-test (pull_request) so canary.yml edits are exercised.
+          ref: ${{ github.event_name == 'pull_request' && github.ref || env.BASE_BRANCH }}
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
           persist-credentials: true
@@ -87,7 +93,13 @@ jobs:
             echo "changed=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
-          branch="canary/${TEMPLATE_REF}"
+          # Encodes both endpoints: lands on <base>, applies template <ref>.
+          # Slugify '/' in the refs (e.g. release/2) so an embedded slash doesn't
+          # split the branch path. The real refs are used verbatim elsewhere
+          # (copier --vcs-ref, gh pr --base).
+          base_slug="${BASE_BRANCH//\//-}"
+          target_slug="${TEMPLATE_REF//\//-}"
+          branch="canary/base-${base_slug}-target-${target_slug}"
           git switch -c "${branch}"
           git commit -m "canary: apply full-stack-fastapi-template@${TEMPLATE_REF}"
           # On a pull_request run the checkout is the PR merge ref, not the base;
