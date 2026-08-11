@@ -52,7 +52,7 @@ jobs:
           client-id: ${{ vars.CANARY_APP_CLIENT_ID }}
           private-key: ${{ secrets.CANARY_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-          permission-contents: read
+          permission-contents: write
           permission-workflows: write
           repositories: ${{ github.event.repository.name }}
 
