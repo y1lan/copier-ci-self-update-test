@@ -35,12 +35,16 @@ permissions:
 # `canary-master` cancelled in-flight runs). PR runs key on the head branch,
 # dispatch on the chosen ref, schedule/push on the ref name.
 concurrency:
-  group: canary-${{ github.event.pull_request.head.ref || format('base-{0}-target-{1}', github.event.inputs.base_branch || github.event.repository.default_branch, github.event.inputs.template_ref || 'master') }}
+  group: canary-${{ github.event.pull_request.head.ref || format('base-{0}-target-{1}', github.event.inputs.base_branch || github.ref_name, github.event.inputs.template_ref || 'master') }}
   cancel-in-progress: true
 
 env:
   TEMPLATE_REF: ${{ github.event.inputs.template_ref || 'master' }}
-  BASE_BRANCH: ${{ github.event.inputs.base_branch || github.event.repository.default_branch }}
+  # Base = explicit input, else (for a PR self-test) the PR's own HEAD branch,
+  # else the ref this run was triggered on (github.ref_name). Using the PR head -
+  # not its base - gives the self-test a distinct canary branch so it never
+  # clobbers the real canary/base-<default>-target-* PR.
+  BASE_BRANCH: ${{ github.event.inputs.base_branch || github.head_ref || github.ref_name }}
 
 jobs:
   canary:
@@ -64,9 +68,9 @@ jobs:
       - name: Check out this repo with the App token (so the push uses it)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Apply onto the chosen base for dispatch/schedule; keep the PR merge
-          # ref for the self-test (pull_request) so canary.yml edits are exercised.
-          ref: ${{ github.event_name == 'pull_request' && github.ref || env.BASE_BRANCH }}
+          # Check out the base we canary onto (BASE_BRANCH). For a PR self-test
+          # that's the PR head branch, so the edited canary.yml is exercised.
+          ref: ${{ env.BASE_BRANCH }}
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
           persist-credentials: true
@@ -103,9 +107,8 @@ jobs:
           branch="canary/base-${base_slug}-target-${target_slug}"
           git switch -c "${branch}"
           git commit -m "canary: apply full-stack-fastapi-template@${TEMPLATE_REF}"
-          # On a pull_request run the checkout is the PR merge ref, not the base;
-          # rebase our single commit onto the real base so the PR stays one clean
-          # commit (no merge commit, no unrelated commits).
+          # Rebase our single commit onto the freshly-fetched base tip so the PR
+          # is always exactly base + one commit (also absorbs base drift mid-run).
           git fetch --no-tags origin "${BASE_BRANCH}"
           git rebase --onto FETCH_HEAD "${branch}~1" "${branch}"
           # App-token push INCLUDES .github/workflows/** and triggers CI natively.
@@ -120,11 +123,24 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH: ${{ steps.commit.outputs.branch }}
         run: |
-          gh pr create --base "${BASE_BRANCH}" --head "${BRANCH}" \
-            --title "[DO NOT MERGE] canary: template@${TEMPLATE_REF}" \
-            --body "Automated canary via CopierCanaryBot. The push includes .github/workflows/** and triggers CI natively." \
-            || echo "PR already exists; updated via force-push."
-          echo "url=$(gh pr view "${BRANCH}" --json url -q .url)" >> "${GITHUB_OUTPUT}"
+          # Idempotent open-or-refresh. The branch was already force-pushed, so an
+          # existing PR is updated automatically - only create when none exists.
+          # Not masking `gh pr create` with `|| echo`, so a real failure (e.g. a
+          # missing permission) fails the step loudly instead of looking like
+          # "already exists".
+          url="$(gh pr view "${BRANCH}" --json url --jq .url 2>/dev/null || true)"
+          if [ -n "${url}" ]; then
+            echo "PR already open (refreshed by the force-push): ${url}"
+          else
+            # Explicit failure handling: `set -e` does NOT reliably abort on a
+            # failing command substitution in an assignment, so catch it here.
+            url="$(gh pr create --base "${BASE_BRANCH}" --head "${BRANCH}" \
+              --title "[DO NOT MERGE] canary: template@${TEMPLATE_REF}" \
+              --body "Automated canary via CopierCanaryBot. The push includes .github/workflows/** and triggers CI natively.")" \
+              || { echo "::error::gh pr create failed for ${BRANCH} (check the App has pull-requests:write)"; exit 1; }
+            echo "Opened PR: ${url}"
+          fi
+          echo "url=${url}" >> "${GITHUB_OUTPUT}"
 
       - name: Watch and report the consumer PR's CI (lenient - never hard-fails)
         if: steps.commit.outputs.changed == 'true'
