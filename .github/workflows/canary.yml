@@ -80,6 +80,11 @@ jobs:
 
       - name: Apply the template ref with copier update
         run: |
+          # Stop git's detached auto-gc/maintenance from writing into copier's
+          # temp clone while it's being deleted, which races rmtree and throws
+          # "OSError: [Errno 39] Directory not empty: 'objects'".
+          git config --global gc.auto 0
+          git config --global maintenance.auto false
           # .git: template overrides _exclude, dropping copier's default .git skip.
           # .agents/.claude: master carries dangling skill symlinks there copier
           # can't read (present only on the dev tip).
